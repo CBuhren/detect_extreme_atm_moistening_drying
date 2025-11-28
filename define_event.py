@@ -48,7 +48,7 @@ def sliding_window_extrema(iwv_smoothed: xr.DataArray, window_size=72, valid_rat
         - extrema_min_idx: Indices of identified minima of the smoothed profile
     """
 
-    half_window = window_size / 2
+    half_window = window_size // 2
     values = iwv_smoothed.values
 
     extrema_max_idx = []

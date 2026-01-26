@@ -10,8 +10,9 @@ import warnings
 import calendar
 warnings.filterwarnings("ignore", message="Index.ravel returning ndarray is deprecated", category=FutureWarning)
 
+# constants
 Q_THRESH   = 0.95 # percentile threshold to define "extreme"
-MAX_LINK_H = 48 # maximum distance (h) between Peaks within multiple peak events
+MAX_LINK_H = 24 # maximum distance (h) between Peaks within multiple peak events
 
 def load_and_concatenate_data(filepath: str) -> xr.Dataset:
     """
@@ -48,13 +49,13 @@ def sliding_window_extrema(iwv_smoothed: xr.DataArray, window_size=72, valid_rat
         - extrema_min_idx: Indices of identified minima of the smoothed profile
     """
 
-    half_window = window_size / 2
+    half_window = int(window_size / 2)
     values = iwv_smoothed.values
-
+    
     extrema_max_idx = []
     extrema_min_idx = []
 
-    for i in range(half_window, len(iwv_smoothed) - half_window):
+    for i in range(half_window, int(len(iwv_smoothed) - half_window)):
         window = values[i - half_window: i + half_window + 1]
         
         valid = ~np.isnan(window)
@@ -80,6 +81,7 @@ def find_real_extremum(iwv: xr.DataArray, approx_idx, kind, window: int, directi
     identified extrema from the smoothed IWV timeseries.
 
     Parameters:
+    -----------
         - iwv: `xr.DataArray` of the 10-min resolved IWV data
         - approx_idx: indices of the rough position of the local extrema from the smoothed profile
         - kind: either `min` or `max` search
@@ -117,13 +119,17 @@ def build_segment_dict(mean_iwv, mean_iwv_df, q_thresh: float, idx_min1: int, id
     Function to collect information of MP-M or MP-D events (min1, min2, peak, duration, amplitudes)
 
     Parameters:
-    ----------
+    -----------
         - mean_iwv: 10-min resolved IWV data (10-min means)
         - mean_iwv_df: same as mean_IWV but as pandas dataframe
         - q_thresh: percentile value (0.95 - or 95th percentile) to define extreme atmospheric moistening and drying
         - idx_min1: index value of min1 points
         - idx_peak: index value of peak points
         - idx_min2: index value of min2 points
+
+    Returns:
+    --------
+        - seg_dic: dictionary with identified events with several information
     """
     amp_inc = float((mean_iwv[idx_peak] - mean_iwv[idx_min1]).values)
     amp_dec = float((mean_iwv[idx_peak] - mean_iwv[idx_min2]).values)
@@ -132,12 +138,12 @@ def build_segment_dict(mean_iwv, mean_iwv_df, q_thresh: float, idx_min1: int, id
 
     w_inc = max(1, int(round(t_inc_h)))
     w_dec = max(1, int(round(t_dec_h)))
-    roll_inc = mean_iwv_df.rolling(f'{w_inc}H', center=True)
-    roll_dec = mean_iwv_df.rolling(f'{w_dec}H', center=True)
+    roll_inc = mean_iwv_df.rolling(f'{w_inc}h', center=True)
+    roll_dec = mean_iwv_df.rolling(f'{w_dec}h', center=True)
     thr_inc = float((roll_inc.max() - roll_inc.min()).quantile(q_thresh))
     thr_dec = float((roll_dec.max() - roll_dec.min()).quantile(q_thresh))
 
-    #built up segment dictionary of MP-M and MP-D chains with multiple detections (peaks)
+    # built up segment dictionary of MP-M and MP-D chains with multiple detections (peaks)
     seg_dic = {
         "idx_min1": int(idx_min1),
         "idx_peak": int(idx_peak),
@@ -163,14 +169,14 @@ def grow_chain_left(chain_segments, real_max_idx, real_min_idx, mean_iwv,
     Extends a forward-built chain to the left, i.e., backward in time
 
     Parameters:
-    ----------
+    -----------
         - chain_segments: 
-
-    mode="up"  (MP-M):   peak_prev < peak_curr,  min1_prev < min1_curr,  min2_prev == min1_curr,
-                         UND (Zwischen-Segment-Bedingung) min2_prev ≥ min1_prev
-    mode="down"(MP-D):   peak_prev > peak_curr,  min1_prev > min1_curr,  min2_prev == min1_curr,
-                         UND (Zwischen-Segment-Bedingung) min2_prev ≤ min1_prev
+    mode="up"  (MP-M): peak_prev < peak_curr,  min1_prev < min1_curr,  min2_prev == min1_curr,
+                        and (condition) min2_prev ≥ min1_prev
+    mode="down"(MP-D): peak_prev > peak_curr,  min1_prev > min1_curr,  min2_prev == min1_curr,
+                        and (condition) min2_prev ≤ min1_prev
     """
+
     if not chain_segments:
         return chain_segments
 
@@ -248,7 +254,7 @@ def grow_chain_right(peak_idx, min1_idx, direction_mode,
                        real_max_idx, real_min_idx, mean_iwv, mean_iwv_df,
                        q_thresh=Q_THRESH, MAX_LINK_H=MAX_LINK_H):
     """
-    Extends a forward-built chain to the left, i.e., backward in time
+    Extends a forward-built chain to the left, i.e., forward in time
 
     Parameters:
     ----------
@@ -261,6 +267,10 @@ def grow_chain_right(peak_idx, min1_idx, direction_mode,
         - mean_iwv_df: same as mean_IWV but as pandas dataframe
         - q_thresh: percentile value (0.95 - or 95th percentile) to define extreme atmospheric moistening and drying
         - MAX_LINK_H: denotes the maximum time difference that is allowed for next peak (not more than 48 hours apart)
+
+    Returns:
+    --------
+        - chain_segments: contains minima and maxima of a possible MP event
     """
     
     chain_segments = []
@@ -346,6 +356,7 @@ def _nan_to_none(x):
     --------
         - converted any instances of NaN to None
     """
+
     return None if (x is None or (isinstance(x, float) and np.isnan(x))) else x
 
 def pack_record(base: dict, month: int, event_type: str, extra: dict | None = None) -> dict:
@@ -446,7 +457,7 @@ def event_detection_algo(ds_mwr_concat_years, year, mo):
     if not real_min_idx or not real_max_idx:
         return []
 
-    # --- Handles two closely located extrema (<12h) ---
+    # handles two closely located extrema (<12h)
     # Peaks: keep highest
     filtered_real_max_idx = []
     i = 0
@@ -485,7 +496,7 @@ def event_detection_algo(ds_mwr_concat_years, year, mo):
         i = j
     real_min_idx = sorted(set(filtered_real_min_idx))
 
-    # --- Handles general cases with >1 peaks between two minima, and >1 minima between two peaks
+    # handles general cases with >1 peaks (minima) between two minima (peaks) (if any left)
     keep_peaks = set(real_max_idx)
     for i in range(len(real_min_idx) - 1):
         left_min = real_min_idx[i]
@@ -517,8 +528,8 @@ def event_detection_algo(ds_mwr_concat_years, year, mo):
     iwv_sel_month = ds_mwr_concat_years.prw_10min[:, 0].sel(time=ds_mwr_concat_years.time.dt.month.isin([mo]))
     mean_iwv_df = iwv_sel_month.to_series()
 
-    # --- chain logic ---
-    emitted_segments = set()  # this set just makes sure to have non equal entries (min1,peak,min2,event_type)
+    # ---- here begin the chain logic ----
+    emitted_segments = set()  # this set just makes sure to have non equal entries (min1, peak, min2, event_type)
     mp_committed_peaks = set()
 
     mp_m_windows = set()
@@ -571,19 +582,18 @@ def event_detection_algo(ds_mwr_concat_years, year, mo):
                                      mean_iwv, mean_iwv_df,
                                      q_thresh=Q_THRESH, max_gap_h=MAX_LINK_H, mode="down")
 
-        # Falls beide leer → nächster Startpeak
+        # if both empty, go to next peak
         if not chain_up and not chain_down:
             i += 1
             continue
 
-        # 2) Klassifizieren
+        # classification of MP and SP events
         inc_any_up   = any(seg["inc_extreme"] for seg in chain_up)
         dec_any_down = any(seg["dec_extreme"] for seg in chain_down)
         is_mp_m = (len(chain_up)   >= 2) and inc_any_up
         is_mp_d = (len(chain_down) >= 2) and dec_any_down
 
         if is_mp_m or is_mp_d:
-            # Längere Kette gewinnt (bei Gleichstand MP-M)
             if is_mp_m and (not is_mp_d or len(chain_up) >= len(chain_down)):
                 chosen = chain_up;  ctype = "MP-M"; last_idx = chain_up[-1]["idx_peak"]
             else:
@@ -594,7 +604,7 @@ def event_detection_algo(ds_mwr_concat_years, year, mo):
                 rec["month"] = mo
                 rec["event_type"] = ctype
 
-                # Halbsegment-Trim an der Wende
+                # cut the MP event at peak (min2) in case of moistening (drying)
                 if ctype == "MP-M" and k == len(chosen) - 1:
                     mp_m_windows.add( (seg["idx_min1"], seg["idx_peak"]) )
                     rec["amp_dec"] = np.nan
@@ -728,7 +738,7 @@ def event_detection_algo(ds_mwr_concat_years, year, mo):
 
     return results
 
-def save_results_to_csv(results, filepath='/home/cbuhren/PhD/Analysis/', filename="iwv_detections_2012_2024_final.csv"):
+def save_results_to_csv(results, filepath='/home/cbuhren/PhD/Analysis/', filename="iwv_detections_1_day_change.csv"):
     """
     The results from the detection algorithm are declared to a pandas Dataframe
     and saved as csv file to a specific location in `{filepath}/{filename}`
@@ -747,17 +757,12 @@ def save_results_to_csv(results, filepath='/home/cbuhren/PhD/Analysis/', filenam
         print(f'File saved (empty) to {outpath}')
         return
 
-    # --- Zeitspalten parsen
     for col in ["time_peak", "time_min1", "time_min2"]:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors="coerce")
 
-    # =========================
-    # KEIN peak-basiertes SP-Droppen mehr!
-    # =========================
-
-    # --- Segment-basierte Entdoppelung ---
-    # MP-M Fenster: (time_min1, time_peak)
+    # from here any falsely double identified events are removed
+    # MP-M window: (time_min1, time_peak)
     mpm = df.loc[df["event_type"] == "MP-M", ["time_min1","time_peak"]].dropna()
     mpm["_key_mpm"] = (
         mpm["time_min1"].astype("datetime64[ns]").astype(str)
@@ -775,7 +780,7 @@ def save_results_to_csv(results, filepath='/home/cbuhren/PhD/Analysis/', filenam
     dup_spm = tmp_spm["_key_mpm"].isin(set(mpm["_key_mpm"]))
     df = df.loc[~(spm_mask & dup_spm)].copy()
 
-    # MP-D Fenster: (time_peak, time_min2)
+    # MP-D window: (time_peak, time_min2)
     mpd = df.loc[df["event_type"] == "MP-D", ["time_peak","time_min2"]].dropna()
     mpd["_key_mpd"] = (
         mpd["time_peak"].astype("datetime64[ns]").astype(str)
@@ -793,19 +798,18 @@ def save_results_to_csv(results, filepath='/home/cbuhren/PhD/Analysis/', filenam
     dup_spd = tmp_spd["_key_mpd"].isin(set(mpd["_key_mpd"]))
     df = df.loc[~(spd_mask & dup_spd)].copy()
 
-    # --- Absicherung: zeilengleiche Dubs (gleiche Zeiten) weg
+    # ensures that only unique time entries of events are present
     keep_cols = [c for c in ["event_type","time_min1","time_peak","time_min2"] if c in df.columns]
     if keep_cols:
         df = df.drop_duplicates(subset=keep_cols, keep="first")
 
-    # --- Sortierung: MP vor SP bei gleichem Peak-Zeitpunkt
     et_rank_map = {"MP-M": 0, "MP-D": 0, "SP-M": 1, "SP-D": 1}
     df["__etype_rank__"] = df.get("event_type", pd.Series(index=df.index)).map(et_rank_map).fillna(2).astype(int)
     df = (df.sort_values(["time_peak","__etype_rank__"], kind="mergesort")
             .drop(columns="__etype_rank__", errors="ignore")
             .reset_index(drop=True))
 
-    # --- Schreiben
+    # write to csv as final event dataset
     df.to_csv(filepath + filename, index=False)
     print(f'File saved to {filepath}/{filename}')
 

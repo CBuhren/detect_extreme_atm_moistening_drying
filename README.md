@@ -12,10 +12,12 @@ Email: christian.buhren
 
 The algorithm was developed and tested with the following package versions:
 
-- Python 3.10.12
-- pandas 1.5.3
-- numpy 1.24.4
-- xarray 2023.6.0
+- Python 3.11.14
+- pandas==2.3.3
+- numpy==2.3.5
+- xarray==2025.12.0
+
+Note that a conda environment has been used to run all scripts!
 
 ## Input data
 

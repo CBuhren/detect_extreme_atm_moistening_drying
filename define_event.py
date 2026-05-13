@@ -12,23 +12,27 @@ warnings.filterwarnings("ignore", message="Index.ravel returning ndarray is depr
 
 # constants
 Q_THRESH   = 0.95 # percentile threshold to define "extreme"
-MAX_LINK_H = 24 # maximum distance (h) between Peaks within multiple peak events
+MAX_LINK_H = 48 # maximum distance (h) between Peaks within multiple peak events
 
 def load_and_concatenate_data(filepath: str) -> xr.Dataset:
     """
     Import the MWR data from given `filepath` and load as one xr.Dataset
 
     Parameters:
+    -----------
         - filepath: filepath to MWR data (`str`)
 
     Returns:
+    --------
         - ds_all: 10-min resolved MWR data of IWV of LWP (`xr.Dataset`)
     """
 
     files_all_years = sorted(glob.glob(f"{filepath}/20[1-2][0-9]/*.nc"))
     ds_all = xr.open_mfdataset(files_all_years, combine='nested', concat_dim='time')
     ds_all.load()
+
     print('Data loaded to memory.')
+
     return ds_all
 
 def sliding_window_extrema(iwv_smoothed: xr.DataArray, window_size=72, valid_ratio=0.5):
@@ -55,6 +59,10 @@ def sliding_window_extrema(iwv_smoothed: xr.DataArray, window_size=72, valid_rat
     extrema_max_idx = []
     extrema_min_idx = []
 
+    # kleine Toleranz für Gleichheit (Plateaus) + deterministische Repräsentant-Wahl
+    eps = 1e-6          # numerical tolerance
+    choose = "left"     # take left point in cases of two maxima or minima with equal value
+
     for i in range(half_window, int(len(iwv_smoothed) - half_window)):
         window = values[i - half_window: i + half_window + 1]
         
@@ -66,12 +74,36 @@ def sliding_window_extrema(iwv_smoothed: xr.DataArray, window_size=72, valid_rat
         if np.isnan(center_val):
             continue  # skip index if center is NaN
         
-        # checks for maxima and minima
-        if center_val == np.nanmax(window):
-            extrema_max_idx.append(i)
-        
-        elif center_val == np.nanmin(window):
-            extrema_min_idx.append(i)
+        # checks for maxima and takes only one maxima in cases of plateau maxima
+        wmax = np.nanmax(window)
+        if np.isfinite(wmax) and abs(center_val - wmax) < eps:
+            plateau = np.where(np.abs(window - wmax) < eps)[0]
+            if plateau.size > 0:
+                if choose == "left":
+                    rep_rel = plateau[0]
+                elif choose == "right":
+                    rep_rel = plateau[-1]
+                else:  # "center"
+                    rep_rel = plateau[len(plateau)//2]
+                rep_idx = i - half_window + rep_rel
+                if rep_idx == i:
+                    extrema_max_idx.append(i)
+            continue  # not count as a minimum at the same time
+
+        # checks for minima and takes only one minimum in cases of plateau minima
+        wmin = np.nanmin(window)
+        if np.isfinite(wmin) and abs(center_val - wmin) < eps:
+            plateau = np.where(np.abs(window - wmin) < eps)[0]
+            if plateau.size > 0:
+                if choose == "left":
+                    rep_rel = plateau[0]
+                elif choose == "right":
+                    rep_rel = plateau[-1]
+                else:  # "center"
+                    rep_rel = plateau[len(plateau)//2]
+                rep_idx = i - half_window + rep_rel
+                if rep_idx == i:
+                    extrema_min_idx.append(i)
 
     return extrema_max_idx, extrema_min_idx
 
@@ -82,7 +114,7 @@ def find_real_extremum(iwv: xr.DataArray, approx_idx, kind, window: int, directi
 
     Parameters:
     -----------
-        - iwv: `xr.DataArray` of the 10-min resolved IWV data
+        - iwv: `xr.DataArray` of the 10-min mean IWV data
         - approx_idx: indices of the rough position of the local extrema from the smoothed profile
         - kind: either `min` or `max` search
         - window: window size to look around each smoothed extrema index. Here: `6 hours around each index`
@@ -90,6 +122,7 @@ def find_real_extremum(iwv: xr.DataArray, approx_idx, kind, window: int, directi
         looks in both directions
 
     Returns:
+    --------
         - start + idx_in_seg: The true index of the actual extrema
     """
 
@@ -112,9 +145,50 @@ def find_real_extremum(iwv: xr.DataArray, approx_idx, kind, window: int, directi
         idx_in_seg = np.nanargmin(segment)
     else:
         idx_in_seg = np.nanargmax(segment)
+
     return start + idx_in_seg
 
-def build_segment_dict(mean_iwv, mean_iwv_df, q_thresh: float, idx_min1: int, idx_peak: int, idx_min2: int):
+def precompute_directional_thresholds(mean_iwv_df: pd.Series, q_thresh: float, max_h: int = 72, min_periods = 2):
+    """
+    Function to compute typical amplitudes for all possible times for moistening and drying seperately.
+
+    Parameters:
+    -----------
+        - mean_iwv_df: `pd.Series` of the 10-minute mean IWV data
+        - q_thresh: percentile value (0.95 - or 95th percentile) to define extreme atmospheric moistening and drying
+        - max_h: maximum possible hour
+        - min_periods: just in case the min index is the same as the max index.
+
+    Returns:
+    --------
+        - thr_inc_by_h: threshold values for extreme moistening
+        - thr_dec_by_h: threshold values for extreme drying
+    """
+
+    s = mean_iwv_df.sort_index()
+
+    thr_inc_by_h = {}
+    thr_dec_by_h = {}
+
+    for h in range(1, max_h + 1):
+        r = s.rolling(f"{h}h", center=True, min_periods=min_periods)
+
+        roll_max = r.max()
+        roll_min = r.min()
+        amp = roll_max - roll_min
+
+        pos_max = r.apply(lambda x: np.nanargmax(x), raw=True)
+        pos_min = r.apply(lambda x: np.nanargmin(x), raw=True)
+
+        moist_mask = pos_min < pos_max
+        dry_mask   = pos_max < pos_min
+
+        thr_inc_by_h[h] = float(amp.where(moist_mask).quantile(q_thresh))
+        thr_dec_by_h[h] = float(amp.where(dry_mask).quantile(q_thresh))
+
+    return thr_inc_by_h, thr_dec_by_h
+
+def build_segment_dict(mean_iwv, idx_min1: int, idx_peak: int, idx_min2: int, thr_inc_by_h: dict, thr_dec_by_h: dict):
     """
     Function to collect information of MP-M or MP-D events (min1, min2, peak, duration, amplitudes)
 
@@ -122,28 +196,25 @@ def build_segment_dict(mean_iwv, mean_iwv_df, q_thresh: float, idx_min1: int, id
     -----------
         - mean_iwv: 10-min resolved IWV data (10-min means)
         - mean_iwv_df: same as mean_IWV but as pandas dataframe
-        - q_thresh: percentile value (0.95 - or 95th percentile) to define extreme atmospheric moistening and drying
         - idx_min1: index value of min1 points
         - idx_peak: index value of peak points
         - idx_min2: index value of min2 points
-
-    Returns:
-    --------
-        - seg_dic: dictionary with identified events with several information
+        - thr_inc_by_h: threshold values for extreme moistening
+        - thr_dec_by_h: threshold values for extreme drying
     """
+
     amp_inc = float((mean_iwv[idx_peak] - mean_iwv[idx_min1]).values)
     amp_dec = float((mean_iwv[idx_peak] - mean_iwv[idx_min2]).values)
+
     t_inc_h = float((mean_iwv.time[idx_peak].values - mean_iwv.time[idx_min1].values) / np.timedelta64(1, 'h'))
     t_dec_h = float((mean_iwv.time[idx_min2].values - mean_iwv.time[idx_peak].values) / np.timedelta64(1, 'h'))
 
-    w_inc = max(1, int(round(t_inc_h)))
-    w_dec = max(1, int(round(t_dec_h)))
-    roll_inc = mean_iwv_df.rolling(f'{w_inc}h', center=True)
-    roll_dec = mean_iwv_df.rolling(f'{w_dec}h', center=True)
-    thr_inc = float((roll_inc.max() - roll_inc.min()).quantile(q_thresh))
-    thr_dec = float((roll_dec.max() - roll_dec.min()).quantile(q_thresh))
+    w_inc = min(72, max(1, int(round(t_inc_h))))
+    w_dec = min(72, max(1, int(round(t_dec_h))))
 
-    # built up segment dictionary of MP-M and MP-D chains with multiple detections (peaks)
+    thr_inc = thr_inc_by_h.get(w_inc, np.nan)
+    thr_dec = thr_dec_by_h.get(w_dec, np.nan)
+
     seg_dic = {
         "idx_min1": int(idx_min1),
         "idx_peak": int(idx_peak),
@@ -157,26 +228,27 @@ def build_segment_dict(mean_iwv, mean_iwv_df, q_thresh: float, idx_min1: int, id
         "amp_dec": round(amp_dec, 3),
         "dur_inc_hours": t_inc_h,
         "dur_dec_hours": t_dec_h,
-        "inc_extreme": amp_inc >= thr_inc,
-        "dec_extreme": amp_dec >= thr_dec,
+        "inc_extreme": (np.isfinite(thr_inc) and amp_inc >= thr_inc),
+        "dec_extreme": (np.isfinite(thr_dec) and amp_dec >= thr_dec),
     }
 
     return seg_dic
 
 def grow_chain_left(chain_segments, real_max_idx, real_min_idx, mean_iwv,
-                    mean_iwv_df, q_thresh=Q_THRESH, max_gap_h=MAX_LINK_H, mode="up"):
+                    thr_inc_by_h, thr_dec_by_h,
+                    q_thresh=Q_THRESH, max_gap_h=MAX_LINK_H, mode="up"):
     """
     Extends a forward-built chain to the left, i.e., backward in time
 
     Parameters:
-    -----------
+    ----------
         - chain_segments: 
-    mode="up"  (MP-M): peak_prev < peak_curr,  min1_prev < min1_curr,  min2_prev == min1_curr,
-                        and (condition) min2_prev ≥ min1_prev
-    mode="down"(MP-D): peak_prev > peak_curr,  min1_prev > min1_curr,  min2_prev == min1_curr,
-                        and (condition) min2_prev ≤ min1_prev
-    """
 
+    mode="up"  (MP-M):   peak_prev < peak_curr,  min1_prev < min1_curr,  min2_prev == min1_curr,
+                         UND (Zwischen-Segment-Bedingung) min2_prev ≥ min1_prev
+    mode="down"(MP-D):   peak_prev > peak_curr,  min1_prev > min1_curr,  min2_prev == min1_curr,
+                         UND (Zwischen-Segment-Bedingung) min2_prev ≤ min1_prev
+    """
     if not chain_segments:
         return chain_segments
 
@@ -244,20 +316,23 @@ def grow_chain_left(chain_segments, real_max_idx, real_min_idx, mean_iwv,
         if t_inc_h > 72 or t_dec_h > 72:
             break
 
-        seg_left = build_segment_dict(mean_iwv, mean_iwv_df, q_thresh,
-                                      idx_min1=min1_P, idx_peak=peak_P, idx_min2=min2_P)
+        seg_left = build_segment_dict(mean_iwv,
+                                    idx_min1=min1_P, idx_peak=peak_P, idx_min2=min2_P,
+                                    thr_inc_by_h=thr_inc_by_h, thr_dec_by_h=thr_dec_by_h)
+        
         segs.insert(0, seg_left)
 
     return segs
 
 def grow_chain_right(peak_idx, min1_idx, direction_mode,
-                       real_max_idx, real_min_idx, mean_iwv, mean_iwv_df,
-                       q_thresh=Q_THRESH, MAX_LINK_H=MAX_LINK_H):
+                     real_max_idx, real_min_idx, mean_iwv,
+                     thr_inc_by_h, thr_dec_by_h,
+                     q_thresh=Q_THRESH, MAX_LINK_H=MAX_LINK_H):
     """
-    Extends a forward-built chain to the left, i.e., forward in time
+    Extends a forward-built chain to the left, i.e., backward in time
 
     Parameters:
-    ----------
+    -----------
         - peak_idx: index value of peak point
         - min1_idx: index value of min1 point
         - direction_mode: either `up` or `down` referring to moistening and drying
@@ -267,10 +342,6 @@ def grow_chain_right(peak_idx, min1_idx, direction_mode,
         - mean_iwv_df: same as mean_IWV but as pandas dataframe
         - q_thresh: percentile value (0.95 - or 95th percentile) to define extreme atmospheric moistening and drying
         - MAX_LINK_H: denotes the maximum time difference that is allowed for next peak (not more than 48 hours apart)
-
-    Returns:
-    --------
-        - chain_segments: contains minima and maxima of a possible MP event
     """
     
     chain_segments = []
@@ -332,8 +403,10 @@ def grow_chain_right(peak_idx, min1_idx, direction_mode,
             else: # keep last peak for MP-M
                 pass
 
-        seg = build_segment_dict(mean_iwv, mean_iwv_df, q_thresh,
-                                 idx_min1=current_min1_idx, idx_peak=current_peak_idx, idx_min2=min2_idx)
+        seg = build_segment_dict(mean_iwv,
+                                idx_min1=current_min1_idx, idx_peak=current_peak_idx, idx_min2=min2_idx,
+                                thr_inc_by_h=thr_inc_by_h, thr_dec_by_h=thr_dec_by_h)
+        
         chain_segments.append(seg)
 
         if have_next:
@@ -394,9 +467,10 @@ def pack_record(base: dict, month: int, event_type: str, extra: dict | None = No
     if extra:
         tail.update(extra)
     rec.update(tail)
+
     return rec
 
-def event_detection_algo(ds_mwr_concat_years, year, mo):
+def event_detection_algo(ds_mwr_concat_years, year, mo, thr_cache=None):
     """
     Runs the detection algorithm to find extreme moistening and drying cases.
     Specifically, all identified maxima and minima are taken to calculate
@@ -408,12 +482,17 @@ def event_detection_algo(ds_mwr_concat_years, year, mo):
     For example, if an amplitude with a duration time t from min1 to peak (moistening)
     or from peak to min2 (drying) is detected in January, then the 95th percentile 
     of the IWV amplitude of all Januaries from 2012-2024 for time t is calculated.
+
+    Note: at the moment, MP events may be affected by SP events that are embedded in the 
+    chain of peaks. So, an MP maybe be disrupted by an SP event. In this case, we take only
+    the MP event into account, since we are only interested in the most dominating process.
     
     Parameters:
     -----------
         - ds_mwr_concat_years: `xr.Dataset` of the 10-min resolved MWR data
         - year: `int`, year to run
         - mo: `int`, month to run
+        - thr_cache: per month only one amplitude threshold calculation
 
     Returns:
     --------
@@ -468,7 +547,7 @@ def event_detection_algo(ds_mwr_concat_years, year, mo):
         while j < len(real_max_idx):
             tj = mean_iwv.time[real_max_idx[j]].values
             delta_h = (tj - t0) / np.timedelta64(1, "h")
-            if delta_h < 12:
+            if delta_h < 6:
                 group.append(real_max_idx[j]); j += 1
             else:
                 break
@@ -487,7 +566,7 @@ def event_detection_algo(ds_mwr_concat_years, year, mo):
         while j < len(real_min_idx):
             tj = mean_iwv.time[real_min_idx[j]].values
             delta_h = (tj - t0) / np.timedelta64(1, "h")
-            if delta_h < 12:
+            if delta_h < 6:
                 group.append(real_min_idx[j]); j += 1
             else:
                 break
@@ -525,8 +604,18 @@ def event_detection_algo(ds_mwr_concat_years, year, mo):
     real_min_idx = sorted(keep_mins)
 
     # prepare for threshold evaluation (selects the month of current index i)
-    iwv_sel_month = ds_mwr_concat_years.prw_10min[:, 0].sel(time=ds_mwr_concat_years.time.dt.month.isin([mo]))
-    mean_iwv_df = iwv_sel_month.to_series()
+    if thr_cache is None:
+        thr_cache = {}
+
+    if mo in thr_cache:
+        thr_inc_by_h, thr_dec_by_h = thr_cache[mo]
+    else:
+        iwv_sel_month = ds_mwr_concat_years.prw_10min[:, 0].sel(time=ds_mwr_concat_years.time.dt.month.isin([mo]))
+        mean_iwv_df = iwv_sel_month.to_series()
+        thr_inc_by_h, thr_dec_by_h = precompute_directional_thresholds(
+            mean_iwv_df, q_thresh=Q_THRESH, max_h=72, min_periods=2
+        )
+        thr_cache[mo] = (thr_inc_by_h, thr_dec_by_h)
 
     # ---- here begin the chain logic ----
     emitted_segments = set()  # this set just makes sure to have non equal entries (min1, peak, min2, event_type)
@@ -565,22 +654,26 @@ def event_detection_algo(ds_mwr_concat_years, year, mo):
         chain_up = grow_chain_right(
             peak_idx=peak_idx, min1_idx=min1_idx, direction_mode="up",
             real_max_idx=real_max_idx, real_min_idx=real_min_idx,
-            mean_iwv=mean_iwv, mean_iwv_df=mean_iwv_df,
-            q_thresh=Q_THRESH, MAX_LINK_H=MAX_LINK_H
-        )
+            mean_iwv=mean_iwv,
+            thr_inc_by_h=thr_inc_by_h, thr_dec_by_h=thr_dec_by_h,
+            q_thresh=Q_THRESH, MAX_LINK_H=MAX_LINK_H)
+
         chain_up = grow_chain_left(chain_up, real_max_idx, real_min_idx,
-                                   mean_iwv, mean_iwv_df,
-                                   q_thresh=Q_THRESH, max_gap_h=MAX_LINK_H, mode="up")
+                                mean_iwv,
+                                thr_inc_by_h=thr_inc_by_h, thr_dec_by_h=thr_dec_by_h,
+                                q_thresh=Q_THRESH, max_gap_h=MAX_LINK_H, mode="up")
 
         chain_down = grow_chain_right(
             peak_idx=peak_idx, min1_idx=min1_idx, direction_mode="down",
             real_max_idx=real_max_idx, real_min_idx=real_min_idx,
-            mean_iwv=mean_iwv, mean_iwv_df=mean_iwv_df,
-            q_thresh=Q_THRESH, MAX_LINK_H=MAX_LINK_H
-        )
+            mean_iwv=mean_iwv,
+            thr_inc_by_h=thr_inc_by_h, thr_dec_by_h=thr_dec_by_h,
+            q_thresh=Q_THRESH, MAX_LINK_H=MAX_LINK_H)
+
         chain_down = grow_chain_left(chain_down, real_max_idx, real_min_idx,
-                                     mean_iwv, mean_iwv_df,
-                                     q_thresh=Q_THRESH, max_gap_h=MAX_LINK_H, mode="down")
+                                    mean_iwv,
+                                    thr_inc_by_h=thr_inc_by_h, thr_dec_by_h=thr_dec_by_h,
+                                    q_thresh=Q_THRESH, max_gap_h=MAX_LINK_H, mode="down")
 
         # if both empty, go to next peak
         if not chain_up and not chain_down:
@@ -738,12 +831,15 @@ def event_detection_algo(ds_mwr_concat_years, year, mo):
 
     return results
 
-def save_results_to_csv(results, filepath='/home/cbuhren/PhD/Analysis/', filename="iwv_detections_1_day_change.csv"):
+def save_results_to_csv(results, filepath='/home/cbuhren/PhD/Analysis/', filename="iwv_detections_2012-2024_final_final.csv"):
     """
     The results from the detection algorithm are declared to a pandas Dataframe
     and saved as csv file to a specific location in `{filepath}/{filename}`
 
+    Note: You might want to change the year/time period of interest in the filename. 
+
     Parameters:
+    -----------
         - results: `dict`, detected moistening and drying cases
         - filepath: `str`, filepath to store the csv file
         - filename: `str`, filename of detections file
@@ -823,10 +919,12 @@ def run_all_years():
     filepath = '/net/norte/cbuhren/data/hatpro_processed'
     ds_mwr_concat_years = load_and_concatenate_data(filepath)
 
+    thr_cache = {}
+
     all_events = []
-    for year in range(2012, 2025):
+    for year in range(2012, 2025): # you might need to change the year/time period of interest 
         for month in range(1, 13):
-            monthly_events = event_detection_algo(ds_mwr_concat_years, year, month)
+            monthly_events = event_detection_algo(ds_mwr_concat_years, year, month, thr_cache=thr_cache)
             all_events.extend(monthly_events)
         print(f'Done with year {year}')
 

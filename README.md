@@ -6,7 +6,7 @@ Algorithm to identify extreme atmospheric moistening and drying events based on 
 
 Christian Buhren  
 Institute for Geophysics and Meteorology, University of Cologne  
-Email: christian.buhren
+Email: <a href="mailto:christian.buhren@uni-koeln.de"></a> 
 
 ## Requirements
 

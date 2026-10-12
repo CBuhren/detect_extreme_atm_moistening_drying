@@ -1,6 +1,7 @@
 # --- Algorithm to detect extreme atmospheric moistening and drying in IWV timeseries from MWRs ---
 # 
 # Author: Christian Buhren (christian.buhren@uni-koeln.de)
+# Last access: 2026-10-10
 
 import numpy as np
 import xarray as xr
@@ -59,7 +60,7 @@ def sliding_window_extrema(iwv_smoothed: xr.DataArray, window_size=72, valid_rat
     extrema_max_idx = []
     extrema_min_idx = []
 
-    # kleine Toleranz für Gleichheit (Plateaus) + deterministische Repräsentant-Wahl
+    # tolerance value to check for equal values in the window (plateau maxima or minima)
     eps = 1e-6          # numerical tolerance
     choose = "left"     # take left point in cases of two maxima or minima with equal value
 
@@ -244,10 +245,10 @@ def grow_chain_left(chain_segments, real_max_idx, real_min_idx, mean_iwv,
     ----------
         - chain_segments: 
 
-    mode="up"  (MP-M):   peak_prev < peak_curr,  min1_prev < min1_curr,  min2_prev == min1_curr,
-                         UND (Zwischen-Segment-Bedingung) min2_prev ≥ min1_prev
-    mode="down"(MP-D):   peak_prev > peak_curr,  min1_prev > min1_curr,  min2_prev == min1_curr,
-                         UND (Zwischen-Segment-Bedingung) min2_prev ≤ min1_prev
+    mode="up" (MP-M == STEP-M): peak_prev < peak_curr,  min1_prev < min1_curr,  min2_prev == min1_curr,
+        UND (Zwischen-Segment-Bedingung) min2_prev ≥ min1_prev
+    mode="down" (MP-D == STEP-D): peak_prev > peak_curr,  min1_prev > min1_curr,  min2_prev == min1_curr,
+        UND (Zwischen-Segment-Bedingung) min2_prev ≤ min1_prev
     """
     if not chain_segments:
         return chain_segments

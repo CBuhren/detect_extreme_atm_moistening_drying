@@ -24,7 +24,7 @@ Note that a conda environment has been used to run all scripts!
 The script requires quality-controlled IWV data from the Humidity and Temperature Profiler (HATPRO) as input.  
 The algorithm was developed for the related publication:
 
-**DOI_PUBLICATION**
+**DOI: 10.1029/2026JD047364**
 
 For the application at Ny-Ålesund, the following quality-controlled IWV dataset was used:
 
@@ -45,7 +45,7 @@ Amplitudes exceeding the monthly threshold are classified as extreme events. The
 
 A detailed description of the algorithm is provided in the related publication:
 
-**DOI_PUBLICATION**
+**DOI: 10.1029/2026JD047364**
 
 ## Repository contents
 
